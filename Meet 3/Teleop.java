@@ -57,6 +57,10 @@ public class Meet3Teleop extends OpMode {
     private boolean autoAimEnabled = true;
     private boolean xPressed = false;
 
+    // Store last calculated values to prevent jumps
+    private double lastShooterVelocity = 1130;
+    private double lastHoodPosition = 0.5;
+
     // Timer for servo delay
     private ElapsedTime triggerTimer = new ElapsedTime();
     private ElapsedTime rightTriggerTimer = new ElapsedTime();
@@ -106,7 +110,7 @@ public class Meet3Teleop extends OpMode {
 
 
         // pidf stuff
-        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.002,0,0,15.5);
+        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.002,0,0,16.3);
         Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
         Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
 
@@ -171,6 +175,13 @@ public class Meet3Teleop extends OpMode {
         if (gamepad1.x && !xPressed) {
             xPressed = true;
             autoAimEnabled = !autoAimEnabled;
+
+            // When toggling, preserve current values to prevent jumps
+            if (!autoAimEnabled) {
+                // Switching to manual - store the current auto values
+                lastShooterVelocity = calculateShooterVelocity(distanceToGoal);
+                lastHoodPosition = calculateHoodPosition(distanceToGoal);
+            }
         } else if (!gamepad1.x) {
             xPressed = false;
         }
@@ -184,10 +195,14 @@ public class Meet3Teleop extends OpMode {
             // Auto-aim: calculate based on regression functions
             shooterVelocity = calculateShooterVelocity(distanceToGoal);
             hoodPosition = calculateHoodPosition(distanceToGoal);
+
+            // Store these values for smooth transition
+            lastShooterVelocity = shooterVelocity;
+            lastHoodPosition = hoodPosition;
         } else {
-            // Manual mode: use default values
-            shooterVelocity = 1130;
-            hoodPosition = 0.5;
+            // Manual mode: use last known values to prevent jumping
+            shooterVelocity = lastShooterVelocity;
+            hoodPosition = lastHoodPosition;
         }
 
         // Set shooter velocity and hood position
@@ -252,7 +267,7 @@ public class Meet3Teleop extends OpMode {
 
             // Set Control motor to full power
             Control.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
-            Control.setPower(0.7);
+            Control.setPower(1);
 
             // After 0.1 seconds, start running servos continuously in positive direction
             if (triggerTimer.seconds() >= 0.1) {
@@ -298,10 +313,13 @@ public class Meet3Teleop extends OpMode {
 
     /**
      * Calculate shooter velocity based on distance to goal
-     * Quadratic regression: y = 0.0444228x² - 3.83924x + 1180.5685
+     * Logarithmic regression: y = -493.52293 + 374.78968 * ln(x)
      */
     private double calculateShooterVelocity(double distance) {
-        double velocity = 0.0444228 * distance * distance - 3.83924 * distance + 1180.5685;
+        // Prevent ln(0) or negative values
+        if (distance < 1) distance = 1;
+
+        double velocity = -493.52293 + 374.78968 * Math.log(distance);
 
         // Clamp velocity to safe range
         if (velocity < 800) velocity = 800;
@@ -312,13 +330,11 @@ public class Meet3Teleop extends OpMode {
 
     /**
      * Calculate hood position based on distance to goal
-     * Cubic regression: y = (6.89227×10⁻⁷)x³ - 0.000230148x² + 0.0248238x - 0.668827
+     * Sigmoid regression: y = 0.24 / (1 + e^(-(0.596021x - 33.74169)))
      */
     private double calculateHoodPosition(double distance) {
-        double position = (6.89227e-7) * Math.pow(distance, 3)
-                - 0.000230148 * distance * distance
-                + 0.0248238 * distance
-                - 0.668827;
+        double exponent = -(0.596021 * distance - 33.74169);
+        double position = 0.24 / (1 + Math.exp(exponent));
 
         // Clamp to servo range (0.0 to 1.0)
         if (position < 0.0) position = 0.0;
