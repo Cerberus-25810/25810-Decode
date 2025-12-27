@@ -12,6 +12,9 @@ import com.qualcomm.robotcore.hardware.DcMotor;
 import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.hardware.PwmControl;
+import com.qualcomm.robotcore.hardware.Servo;
+import com.qualcomm.robotcore.hardware.ServoImplEx;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 import org.firstinspires.ftc.teamcode.Meet1.mechanisms.FlywheelLogic;
@@ -36,6 +39,8 @@ public class BlueSideMeet3 extends OpMode {
     private Timer pathTimer, opModeTimer;
 
     private DcMotorEx Shooter;
+
+    private ServoImplEx Hood;
 
     private DcMotorEx Shooter2;
     private DcMotor Intake;
@@ -68,7 +73,17 @@ public class BlueSideMeet3 extends OpMode {
 
         DRIVE_BACKUP_SHOOTPOS,
 
-        SHOOT_PRELOAD_3
+        SHOOT_PRELOAD_3,
+
+        DRIVE_SHOOT_PICKUPLINEUPTHIRD,
+
+        DRIVE_PICKUPLINEUPTHIRD_PICKUPTHIRD,
+
+        DRIVE_PICKUPTHIRD_SHOOTPOS,
+
+        SHOOT_PRELOAD_4,
+
+        DRIVE_SHOOTPOS_LEAVE
     }
 
     PathState pathState;
@@ -81,15 +96,21 @@ public class BlueSideMeet3 extends OpMode {
     private final Pose endPose = new Pose(64,105,Math.toRadians(90)); //TESTING POSE
 
     private final Pose pickUpLineUpFirst = new Pose(47.5,83.8, Math.toRadians(180));
-    private final Pose pickUpFirst = new Pose(21,81,Math.toRadians(180));
+    private final Pose pickUpFirst = new Pose(22,81,Math.toRadians(180));
 
-    private final Pose pickUpLineUpSecond = new Pose(45,60,Math.toRadians(180));
+    private final Pose pickUpLineUpSecond = new Pose(47,58,Math.toRadians(180));
 
-    private final Pose pickUpSecond = new Pose(11,60,Math.toRadians(180));
+    private final Pose pickUpSecond = new Pose(14,58,Math.toRadians(180));
 
-    private final Pose backup = new Pose(22,60, Math.toRadians(180));
+    private final Pose backup = new Pose(30,58, Math.toRadians(180));
 
-    private PathChain drive_StartPos_ShootPos,drive_ShootPos_EndPos,drive_ShootPos_PickUpLineUpPos,drive_PickUpLineUpPos_PickUP,drive_PickUp_Shoot,drive_ShootPose_PickUpLineUpSecond,drive_PickUpLineUpSecond_PickUpSecond,drive_BackUp_ShootPos,drive_PickUpSecond_BackUp;
+    private final Pose pickUpLineUpThird = new Pose(45,35,Math.toRadians(180));
+
+    private final Pose pickUpThird = new Pose(12,35,Math.toRadians(180));
+
+    private final Pose Leave = new Pose(62,104, Math.toRadians(136));
+
+    private PathChain drive_StartPos_ShootPos,drive_ShootPos_EndPos,drive_ShootPos_PickUpLineUpPos,drive_PickUpLineUpPos_PickUP,drive_PickUp_Shoot,drive_ShootPose_PickUpLineUpSecond,drive_PickUpLineUpSecond_PickUpSecond,drive_BackUp_ShootPos,drive_PickUpSecond_BackUp,drive_ShootPos_PickUpLineUpThird,drive_PickUpLineUpThird_PickUpThird,drive_PickUpThird_ShootPos,drive_ShootPos_Leave;
 
     public void buildPaths(){
         // Put in coordinates for starting pose to ending pose
@@ -138,17 +159,38 @@ public class BlueSideMeet3 extends OpMode {
                 .setLinearHeadingInterpolation(pickUpSecond.getHeading(),backup.getHeading())
                 .build();
 
+        drive_ShootPos_PickUpLineUpThird = follower.pathBuilder()
+                .addPath(new BezierLine(shootPose,pickUpLineUpThird))
+                .setLinearHeadingInterpolation(shootPose.getHeading(),pickUpLineUpThird.getHeading())
+                .build();
+
+        drive_PickUpLineUpThird_PickUpThird = follower.pathBuilder()
+                .addPath(new BezierLine(pickUpLineUpThird,pickUpThird))
+                .setLinearHeadingInterpolation(pickUpLineUpThird.getHeading(),pickUpThird.getHeading())
+                .build();
+
+        drive_PickUpThird_ShootPos = follower.pathBuilder()
+                .addPath(new BezierLine(pickUpThird,shootPose))
+                .setLinearHeadingInterpolation(pickUpThird.getHeading(),shootPose.getHeading())
+                .build();
+
+        drive_ShootPos_Leave = follower.pathBuilder()
+                .addPath(new BezierLine(shootPose,Leave))
+                .setLinearHeadingInterpolation(shootPose.getHeading(), Leave.getHeading())
+                .build();
 
     }
 
     public void statePathUpdate(){
         switch(pathState){
             case DRIVE_STARTPOS_TO_SHOOTPOS:
+                AutoEndPose = follower.getPose();
                 follower.setMaxPower(1);
                 follower.followPath(drive_StartPos_ShootPos, true);
                 setPathState(PathState.SHOOT_PRELOAD);//it will reset timer & switch state through func on line 81
                 break;
             case SHOOT_PRELOAD:
+                AutoEndPose = follower.getPose();
                 //check is follower done it's path and *3 sexconds has elapsed*
                 if (!follower.isBusy() && pathTimer.getElapsedTimeSeconds() > 2){
                     //TODO: add shooting logic stuff liek rampup things and servo controls
@@ -168,11 +210,13 @@ public class BlueSideMeet3 extends OpMode {
                 break;
 
             case DRIVE_SHOOTPOS_TO_PICKUPLINEUP:
+                AutoEndPose = follower.getPose();
                 follower.followPath(drive_ShootPos_PickUpLineUpPos,true);
                 setPathState(PathState.DRIVE_PICKUPLINEUP_TO_PICKUP);
                 stateTimer.reset();
                 break;
             case DRIVE_PICKUPLINEUP_TO_PICKUP:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()) {
                     follower.followPath(drive_PickUpLineUpPos_PickUP,true);
                     setPathState(PathState.DRIVE_PICKUPPOS_SHOOTPOS);
@@ -180,6 +224,7 @@ public class BlueSideMeet3 extends OpMode {
                 }
                 break;
             case DRIVE_PICKUPPOS_SHOOTPOS:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()){
                     follower.followPath(drive_PickUp_Shoot);
                     telemetry.addLine("last path done");
@@ -188,6 +233,7 @@ public class BlueSideMeet3 extends OpMode {
                 }
                 break;
             case SHOOT_PRELOAD_2:
+                AutoEndPose = follower.getPose();
                 if (!follower.isBusy()){
 
                     if (!follower.isBusy()){
@@ -205,6 +251,7 @@ public class BlueSideMeet3 extends OpMode {
                 break;
 
             case DRIVE_SHOOTPOS_PICKUPLINEUPSECOND:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()){
                     follower.followPath(drive_ShootPose_PickUpLineUpSecond, true);
                     setPathState(PathState.DRIVE_PICKUPLINEUPSECOND_PICKUPSECOND);//it will reset timer & switch state through func on line 81
@@ -213,6 +260,7 @@ public class BlueSideMeet3 extends OpMode {
                 break;
 
             case DRIVE_PICKUPLINEUPSECOND_PICKUPSECOND:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()){
                     follower.followPath(drive_PickUpLineUpSecond_PickUpSecond, true);
                     setPathState(PathState.DRIVE_PICKUPSECOND_BACKUP);
@@ -221,12 +269,14 @@ public class BlueSideMeet3 extends OpMode {
                 break;
 
             case DRIVE_PICKUPSECOND_BACKUP:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()){
                     follower.followPath(drive_PickUpSecond_BackUp,true);
                     setPathState(PathState.DRIVE_BACKUP_SHOOTPOS);
                 }
 
             case DRIVE_BACKUP_SHOOTPOS:
+                AutoEndPose = follower.getPose();
                 if(!follower.isBusy()){
                     follower.followPath(drive_BackUp_ShootPos, true);
                     setPathState(PathState.SHOOT_PRELOAD_3);
@@ -235,6 +285,7 @@ public class BlueSideMeet3 extends OpMode {
                 break;
 
             case SHOOT_PRELOAD_3:
+                AutoEndPose = follower.getPose();
 
                 if (!follower.isBusy()){
                     //TODO: add shooting logic stuff liek rampup things and servo controls
@@ -247,12 +298,61 @@ public class BlueSideMeet3 extends OpMode {
                         }
                         else if(shotsTriggered && !shooter.isBusy()){
                             //shots are done free to trasistion
-//                            setPathState(PathState.DRIVE_SHOOTPOS_TO_PICKUPLINEUP);
+                            setPathState(PathState.DRIVE_SHOOT_PICKUPLINEUPTHIRD);
                         }
                     }
                 }
                 break;
 
+            case DRIVE_SHOOT_PICKUPLINEUPTHIRD:
+                AutoEndPose = follower.getPose();
+                if (!follower.isBusy()){
+                    follower.followPath(drive_ShootPos_PickUpLineUpThird);
+                    setPathState(PathState.DRIVE_PICKUPLINEUPTHIRD_PICKUPTHIRD);
+                }
+                break;
+
+            case DRIVE_PICKUPLINEUPTHIRD_PICKUPTHIRD:
+                AutoEndPose = follower.getPose();
+                if (!follower.isBusy()){
+                    follower.followPath(drive_PickUpLineUpThird_PickUpThird);
+                    setPathState(PathState.DRIVE_PICKUPTHIRD_SHOOTPOS);
+                }
+                break;
+
+            case DRIVE_PICKUPTHIRD_SHOOTPOS:
+                AutoEndPose = follower.getPose();
+                if (!follower.isBusy()){
+                    follower.followPath(drive_PickUpThird_ShootPos);
+                    setPathState(PathState.SHOOT_PRELOAD_4);
+                }
+                break;
+
+            case SHOOT_PRELOAD_4:
+                AutoEndPose = follower.getPose();
+                if (!follower.isBusy()){
+                    //TODO: add shooting logic stuff liek rampup things and servo controls
+
+                    if (!follower.isBusy()){
+                        // requested shots yet?
+                        if (!shotsTriggered){
+                            shooter.fireShots(3);
+                            shotsTriggered = true;
+                        }
+                        else if(shotsTriggered && !shooter.isBusy()){
+                            //shots are done free to trasistion
+                            setPathState(PathState.DRIVE_SHOOTPOS_LEAVE);
+                        }
+                    }
+                }
+                break;
+
+            case DRIVE_SHOOTPOS_LEAVE:
+                AutoEndPose = follower.getPose();
+                if (!follower.isBusy()){
+                    follower.followPath(drive_ShootPos_Leave);
+                }
+                break;
 
 
             default:
@@ -280,6 +380,11 @@ public class BlueSideMeet3 extends OpMode {
         Intake = hardwareMap.get(DcMotor.class, "Intake");
         Control = hardwareMap.get(DcMotor.class, "Control");
         Shooter2 = hardwareMap.get(DcMotorEx.class,"Shooter2");
+        Hood = hardwareMap.get(ServoImplEx.class, "Hood");
+
+        Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
+
+        Hood.setPosition(0);
 
         // Set Control motor to use encoder for position control
         Control.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
@@ -303,7 +408,7 @@ public class BlueSideMeet3 extends OpMode {
         Shooter2.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
 
 
-        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.005,0,0,15.5);
+        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.002,0,0,15.5);
         Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
         Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
 
@@ -312,11 +417,11 @@ public class BlueSideMeet3 extends OpMode {
     }
 
     public void start(){
-        try {
-            Thread.sleep(400); // 400ms delay
-        } catch (InterruptedException e) {
-            e.printStackTrace();
-        }
+//        try {
+//            Thread.sleep(400); // 400ms delay
+//        } catch (InterruptedException e) {
+//            e.printStackTrace();
+//        }
         opModeTimer.resetTimer();
         setPathState(pathState);
         Shooter.setVelocity(1150);
@@ -333,8 +438,10 @@ public class BlueSideMeet3 extends OpMode {
     public void loop(){
         AutoEndPose = follower.getPose();
         follower.update();
+        AutoEndPose = follower.getPose();
         shooter.update();
         statePathUpdate();
+
 
 
         telemetry.addData("path state", pathState.toString());
