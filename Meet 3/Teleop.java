@@ -99,6 +99,7 @@ public class Meet3Teleop extends OpMode {
         // Configure Axon servo for extended PWM range
         Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
 
+        Hood.setPosition(0);
         // Set servo directions - adjust if servos move in opposite directions
         LeftServo.setDirection(CRServo.Direction.FORWARD);
         RightServo.setDirection(CRServo.Direction.REVERSE);
@@ -110,7 +111,7 @@ public class Meet3Teleop extends OpMode {
 
 
         // pidf stuff
-        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.002,0,0,16.3);
+        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.005,0,0,15.5);
         Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
         Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
 
@@ -120,7 +121,7 @@ public class Meet3Teleop extends OpMode {
         leftBack.setDirection(DcMotor.Direction.REVERSE);
 
         // Set starting pose from auto
-        follower.setPose(startPose);
+        follower.setPose(AutoEndPose);
 
         telemetry.addData("Status", "Initialized");
         telemetry.addData("Goal Position", "X: %.1f, Y: %.1f", GOAL_X, GOAL_Y);
