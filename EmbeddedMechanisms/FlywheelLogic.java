@@ -8,6 +8,8 @@ import com.qualcomm.robotcore.hardware.DcMotorEx;
 import com.qualcomm.robotcore.hardware.DcMotorSimple;
 import com.qualcomm.robotcore.hardware.HardwareMap;
 import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.hardware.PwmControl;
+import com.qualcomm.robotcore.hardware.ServoImplEx;
 import com.qualcomm.robotcore.util.ElapsedTime;
 
 public class FlywheelLogic {
@@ -17,6 +19,7 @@ public class FlywheelLogic {
     private ElapsedTime stateTimer = new ElapsedTime();
 
     private DcMotorEx Shooter;
+    private ServoImplEx Hood;
     private DcMotor Intake;
     private DcMotor Control;
 
@@ -35,21 +38,27 @@ public class FlywheelLogic {
 
     // ------------------ Servo Constants ---------------- //
 
-    private double ServoRunTime = 0.6;    // Time servos run to push ball
-    private double ServoStopTime = 0.35;   // Time servos stop between shots
+    private double ServoRunTime = 0.45;    // Time servos run to push ball
+    private double ServoStopTime = 0.25;   // Time servos stop between shots
 
     // ---------------- Flywheel Constants -------------//
 
     private int shotsRemaining = 0;
-    private double MIN_FLYWHEEL_RPM = 1150;
+    private double MIN_FLYWHEEL_RPM = 1120;
     private double TARGET_FLYWHEEL_RPM = 1150;
 
-    private double FLYWHEEL_MAX_SPINUP_TIME = 0.3;
+    private double FLYWHEEL_MAX_SPINUP_TIME = 0;
 
     public void init(HardwareMap hardwareMap){
         Shooter = hardwareMap.get(DcMotorEx.class, "Shooter");
         Intake = hardwareMap.get(DcMotor.class, "Intake");
         Control = hardwareMap.get(DcMotor.class, "Control");
+        Hood = hardwareMap.get(ServoImplEx.class, "Hood");
+
+        // Configure Axon servo for extended PWM range
+        Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
+
+//        Hood.setPosition(0);
 
         // Set Control motor to use encoder for position control
         Control.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
@@ -71,7 +80,7 @@ public class FlywheelLogic {
 
         Shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
 
-        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(16,0,0,15.5);
+        PIDFCoefficients SHOOTERpidfCoefficients = new PIDFCoefficients(0.002,0,0,15.5);
         Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER,SHOOTERpidfCoefficients);
     }
 
@@ -89,6 +98,7 @@ public class FlywheelLogic {
                 //Shooter.setPower(TARGET_FLYWHEEL_RPM);
                 if (TARGET_FLYWHEEL_RPM > MIN_FLYWHEEL_RPM || stateTimer.seconds() > FLYWHEEL_MAX_SPINUP_TIME){
                     Control.setPower(0.3);
+                    Hood.setPosition(0.195);
                     // START servos running to push ball
                     LeftServo.setPower(1);
                     RightServo.setPower(1);
