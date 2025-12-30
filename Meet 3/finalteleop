@@ -1,0 +1,333 @@
+package org.firstinspires.ftc.teamcode;
+
+import com.bylazar.configurables.annotations.Configurable;
+import com.pedropathing.follower.Follower;
+import com.pedropathing.geometry.Pose;
+import com.pedropathing.geometry.BezierLine;
+import com.pedropathing.paths.Path;
+import com.pedropathing.paths.PathChain;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.hardware.PwmControl;
+import com.qualcomm.robotcore.hardware.ServoImplEx;
+import com.qualcomm.robotcore.util.ElapsedTime;
+
+import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+import static org.firstinspires.ftc.teamcode.Meet3.BlueSideMeet3.AutoEndPose;
+
+import android.annotation.SuppressLint;
+import java.util.function.Supplier;
+
+/**
+ * <h1>Final TeleOp Control</h1>
+ */
+@Configurable
+@TeleOp(name = "adi - meet3", group = "TeleOp")
+public class finalteleop extends OpMode {
+
+    private Follower follower;
+
+    // ==================== CONSTANTS ====================
+    private static final Pose RETURN_POSE = new Pose(51, 91, Math.toRadians(143));
+    private final Pose startPose = new Pose(51, 91, Math.toRadians(143));
+
+    // Distance tolerance for Auto-Nav (inches)
+    // If robot is within this distance to target, 'A' button will do nothing.
+    private static final double NAV_TOLERANCE = 0.5;
+
+    // ==================== AUTO NAVIGATION VARS ====================
+    private Supplier<PathChain> returnPathChain;
+    private boolean automatedDrive = false;
+    private boolean lastA = false;
+
+    // ==================== INTERPOLATION TABLES ====================
+    private static final double[][] SHOOTER_TABLE = {
+            {40,    900}, {58,    1000}, {86,    1140}, {87.5,  1140}, {124,   1360}
+    };
+    private static final double[][] HOOD_TABLE = {
+            {40,    0.000}, {58,    0.167}, {86,    0.220}, {87.5,  0.250}, {124,   0.250}
+    };
+    private static final double BATTERY_COMPENSATION_RPM = 100.0;
+
+    // ==================== HARDWARE ====================
+    private DcMotorEx Shooter, Shooter2;
+    private DcMotor Intake, Control;
+    private CRServo LeftServo, RightServo;
+    private ServoImplEx Hood;
+
+    // ==================== STATE VARIABLES ====================
+    private final ElapsedTime shootTimer = new ElapsedTime();
+    private boolean triggerFiring = false;
+
+    // ========== HEADING LOCK CONFIGURATION ==========
+    private boolean headingLocked = false;
+    private boolean lastY = false;
+    private static final double GOAL_X = 12.0;
+    private static final double GOAL_Y = 138.0;
+    private static final Pose DEFAULT_START = new Pose(51, 91, Math.toRadians(143));
+    private static final double HEADING_OFFSET = 12.2;
+
+    private static final double kP = 0.02;
+    private static final double kD = 0.05;
+    private static final double MAX_TURN_POWER = 0.7;
+    private static final double DEADBAND_DEGREES = 1.0;
+
+    private double lastError = 0;
+    private final ElapsedTime pidTimer = new ElapsedTime();
+
+    @SuppressLint("DefaultLocale")
+    @Override
+    public void init() {
+        follower = Constants.createFollower(hardwareMap);
+        initializeHardware();
+        configureMotors();
+        configureServos();
+
+        try {
+            follower.setStartingPose(AutoEndPose != null ? AutoEndPose : startPose);
+        } catch (Exception e) {
+            follower.setStartingPose(startPose);
+        }
+        follower.update();
+        telemetry.addData("Status", "✓ V2 Initialized");
+
+        // DEFINE THE PATH CHAIN SUPPLIER
+        // Uses Lazy Generation to create path from current pose to RETURN_POSE when called
+        returnPathChain = () -> follower.pathBuilder()
+                .addPath(new Path(new BezierLine(follower::getPose, RETURN_POSE)))
+                .setLinearHeadingInterpolation(follower.getPose().getHeading(), RETURN_POSE.getHeading())
+                .build();
+
+        Pose startPose;
+        String poseSource;
+        try {
+            if (AutoEndPose != null) {
+                startPose = AutoEndPose;
+                poseSource = String.format("From Auto (%.1f, %.1f, %.1f°)",
+                        AutoEndPose.getX(), AutoEndPose.getY(), Math.toDegrees(AutoEndPose.getHeading()));
+            } else {
+                startPose = DEFAULT_START;
+                poseSource = "Default (auto not run)";
+            }
+        } catch (Exception e) {
+            startPose = DEFAULT_START;
+            poseSource = "Default (error loading auto)";
+        }
+        follower.setStartingPose(startPose);
+        follower.update();
+
+        telemetry.addLine("✓ ROBOT READY!");
+        telemetry.addData("Start Pose", poseSource);
+        telemetry.update();
+    }
+
+    private void initializeHardware() {
+        Shooter = hardwareMap.get(DcMotorEx.class, "Shooter");
+        Shooter2 = hardwareMap.get(DcMotorEx.class, "Shooter2");
+        Intake = hardwareMap.get(DcMotor.class, "Intake");
+        Control = hardwareMap.get(DcMotor.class, "Control");
+        LeftServo = hardwareMap.get(CRServo.class, "LeftServo");
+        RightServo = hardwareMap.get(CRServo.class, "RightServo");
+        Hood = hardwareMap.get(ServoImplEx.class, "Hood");
+    }
+
+    private void configureMotors() {
+        Shooter.setDirection(DcMotorSimple.Direction.REVERSE);
+        Shooter2.setDirection(DcMotorSimple.Direction.FORWARD);
+        Control.setDirection(DcMotorSimple.Direction.REVERSE);
+        Control.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter2.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        PIDFCoefficients shooterPIDF = new PIDFCoefficients(0.015, 0, 0.017, 17.2900);
+        Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+        Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+    }
+
+    private void configureServos() {
+        Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
+        Hood.setPosition(0);
+        LeftServo.setDirection(CRServo.Direction.FORWARD);
+        RightServo.setDirection(CRServo.Direction.REVERSE);
+    }
+
+    @Override
+    public void start() {
+        follower.startTeleopDrive();
+        pidTimer.reset();
+    }
+
+    @Override
+    public void loop() {
+        follower.update();
+        Pose curPose = follower.getPose();
+
+        // ====================================================================
+        // 1. MANUAL DRIVE & HEADING LOCK (Only if not in Auto Drive)
+        // ====================================================================
+        if (!automatedDrive) {
+            double drive = -gamepad1.left_stick_y;
+            double strafe = -gamepad1.left_stick_x;
+            double turn = -gamepad1.right_stick_x;
+
+            // HEADING LOCK LOGIC
+            if (headingLocked) {
+                turn = calculateGoalLockTurn(curPose);
+            } else {
+                lastError = 0;
+            }
+
+            // Normal driving
+            follower.setTeleOpDrive(drive, strafe, turn, true);
+        }
+
+        // ====================================================================
+        // 2. AUTO-NAVIGATION TOGGLE (A Button)
+        // ====================================================================
+        if (gamepad1.a && !lastA) {
+            if (automatedDrive) {
+                // CASE 1: Robot is currently moving autonomously.
+                // ACTION: Stop immediately.
+                follower.startTeleopDrive();
+                automatedDrive = false;
+                telemetry.addLine("Auto-Nav CANCELLED by Driver");
+            } else {
+                // CASE 2: Robot is in manual control.
+                // CHECK: Are we already at the target?
+                double distToTarget = Math.hypot(RETURN_POSE.getX() - curPose.getX(), RETURN_POSE.getY() - curPose.getY());
+
+                if (distToTarget < NAV_TOLERANCE) {
+                    // ACTION: Do nothing. Already there.
+                    telemetry.addLine("⚠ Ignored: Already at Target");
+                } else {
+                    // ACTION: Start Path to Target.
+                    try {
+                        follower.followPath(returnPathChain.get());
+                        automatedDrive = true;
+                    } catch (Exception e) {
+                        telemetry.addData("Path Error", e.getMessage());
+                        follower.startTeleopDrive();
+                        automatedDrive = false;
+                    }
+                }
+            }
+        }
+        lastA = gamepad1.a;
+
+        // Check if path is finished to reset mode
+        if (automatedDrive && !follower.isBusy()) {
+            follower.startTeleopDrive();
+            automatedDrive = false;
+        }
+
+        // ====================================================================
+        // 3. HEADING LOCK TOGGLE (Y Button)
+        // ====================================================================
+        if (gamepad1.y && !lastY) {
+            headingLocked = !headingLocked;
+            if (headingLocked) {
+                lastError = 0;
+                pidTimer.reset();
+            }
+        }
+        lastY = gamepad1.y;
+
+        // ====================================================================
+        // 4. SHOOTER & HOOD AUTOMATION
+        // ====================================================================
+        double dist = Math.hypot(GOAL_X - curPose.getX(), GOAL_Y - curPose.getY());
+        double vel = interpolate(SHOOTER_TABLE, dist) + BATTERY_COMPENSATION_RPM;
+        Shooter.setVelocity(vel);
+        Shooter2.setVelocity(vel);
+        Hood.setPosition(interpolate(HOOD_TABLE, dist));
+
+        // ====================================================================
+        // 5. INTAKE & FEEDER LOGIC
+        // ====================================================================
+        double intakePower = 0.7;
+        double controlPower = 0.5;
+        double servoPower = -0.4;
+
+        if (gamepad1.left_trigger > 0.1) {
+            // Unjam
+            intakePower = -0.7;
+            controlPower = -0.7;
+            servoPower = -0.5;
+        } else if (gamepad1.right_trigger > 0.2) {
+            // Fire
+            if (!triggerFiring) { shootTimer.reset(); triggerFiring = true; }
+            controlPower = 1.0;
+            servoPower = 1.0;
+        } else {
+            triggerFiring = false;
+        }
+
+        Intake.setPower(intakePower);
+        Control.setPower(controlPower);
+        LeftServo.setPower(servoPower);
+        RightServo.setPower(servoPower);
+
+        // ====================================================================
+        // 6. TELEMETRY
+        // ====================================================================
+        telemetry.addData("Mode", automatedDrive ? "AUTO NAVIGATING" : "MANUAL TELEOP");
+        telemetry.addData("Heading Lock", headingLocked ? "ON" : "OFF");
+        telemetry.addData("Pose", "(%.1f, %.1f) %.1f°", curPose.getX(), curPose.getY(), Math.toDegrees(curPose.getHeading()));
+
+        // Extended Telemetry (Battery efficient?)
+        // YES, Telemetry is very efficient. Typically sent over ADB or Wifi Direct.
+        // It does not drain motor battery.
+        telemetry.addData("Shooter Vel", "%.0f RPM", vel);
+        telemetry.addData("Dist to Goal", "%.1f in", dist);
+        // Display path status if auto driving
+        if (automatedDrive) {
+            telemetry.addData("Target Dist", "%.1f in", Math.hypot(RETURN_POSE.getX() - curPose.getX(), RETURN_POSE.getY() - curPose.getY()));
+        }
+
+        telemetry.update();
+    }
+
+    private double calculateGoalLockTurn(Pose currentPose) {
+        double deltaX = GOAL_X - currentPose.getX();
+        double deltaY = GOAL_Y - currentPose.getY();
+        double currentHeading = normalizeAngle(Math.toDegrees(currentPose.getHeading()));
+        double targetHeading = normalizeAngle(Math.toDegrees(Math.atan2(deltaY, deltaX)) + HEADING_OFFSET);
+
+        double error = targetHeading - currentHeading;
+        while (error > 180) error -= 360;
+        while (error < -180) error += 360;
+
+        double deltaTime = pidTimer.seconds();
+        pidTimer.reset();
+
+        double P = error * kP;
+        // CORRECTED D-Term: No longer divided by time to match user's tuned constants
+        double D = (error - lastError) * kD;
+        lastError = error;
+
+        double turnOutput = Math.max(-MAX_TURN_POWER, Math.min(MAX_TURN_POWER, P + D));
+        if (Math.abs(error) < DEADBAND_DEGREES) turnOutput = 0;
+        return turnOutput;
+    }
+
+    private double normalizeAngle(double angle) {
+        while (angle < 0) angle += 360;
+        while (angle >= 360) angle -= 360;
+        return angle;
+    }
+
+    private double interpolate(double[][] table, double dist) {
+        if (dist <= table[0][0]) return table[0][1];
+        if (dist >= table[table.length - 1][0]) return table[table.length - 1][1];
+        for (int i = 0; i < table.length - 1; i++) {
+            if (dist >= table[i][0] && dist <= table[i+1][0]) {
+                return table[i][1] + (table[i+1][1] - table[i][1]) * (dist - table[i][0]) / (table[i+1][0] - table[i][0]);
+            }
+        }
+        return table[0][1];
+    }
+}
