@@ -1,0 +1,451 @@
+package org.firstinspires.ftc.teamcode.expirement;
+
+import static org.firstinspires.ftc.teamcode.pedroPathing.Tuning.follower;
+
+import com.acmerobotics.dashboard.config.Config;
+import com.pedropathing.geometry.BezierLine;
+import com.pedropathing.geometry.Pose;
+import com.pedropathing.paths.Path;
+import com.pedropathing.paths.PathChain;
+import com.pedropathing.control.PIDFController;
+import com.pedropathing.math.MathFunctions;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.hardware.ServoImplEx;
+import com.qualcomm.robotcore.hardware.PwmControl;
+import com.qualcomm.robotcore.hardware.VoltageSensor;
+import com.qualcomm.robotcore.util.ElapsedTime;
+
+import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+import static org.firstinspires.ftc.teamcode.Meet3.BlueSideMeet3.AutoEndPose;
+
+import java.util.function.Supplier;
+
+/**
+ * RAPID FIRE TELEOP WITH PEDRO PIDF HEADING LOCK AND SHOT DELAY
+ *
+ * This TeleOp implements:
+ * - Pedro Pathing for accurate localization
+ * - Pedro's PIDF heading lock controller for smooth, accurate goal tracking
+ * - Distance-adaptive goal positioning for better accuracy at different ranges
+ * - Rapid fire shooting with configurable delay for flywheel recovery
+ * - Battery-optimized code with cached calculations
+ * - BATTERY VOLTAGE COMPENSATION for consistent shooting performance
+ *
+ * CONTROLS:
+ * - Left Stick: Drive (robot-centric movement)
+ * - Right Stick: Turn (when heading lock is OFF)
+ * - Y: Toggle heading lock (auto-aim at goal)
+ * - A: Auto-drive to starting position
+ * - B: Cancel auto-drive
+ * - RT: Rapid Shoot (with flywheel recovery delay)
+ * - LT: Reverse/unjam (reverse all motors)
+ */
+@TeleOp(name="crod", group="TeleOp")
+public class crod extends OpMode {
+
+    // ==================== GOAL POSITION CONSTANTS ====================
+
+    /**
+     * Goal position coordinates for close/medium range shooting (inches)
+     */
+    private static final double GOAL_X_CLOSE = 13.0;
+    private static final double GOAL_Y_CLOSE = 135.0;
+
+    /**
+     * Goal position coordinates for far range shooting (inches)
+     */
+    private static final double GOAL_X_FAR = 25.0;
+    private static final double GOAL_Y_FAR = 140.0;
+
+    /**
+     * Distance threshold to switch between close and far goal positions (inches)
+     */
+    private static final double DISTANCE_THRESHOLD = 90.0;
+
+    /**
+     * Return position for A button auto-drive feature
+     */
+    private static final Pose RETURN_POSE = new Pose(51, 91, Math.toRadians(143));
+
+    /**
+     * Default starting pose if autonomous didn't run
+     */
+    private final Pose startPose = new Pose(51, 91, Math.toRadians(143));
+
+    // ==================== HEADING LOCK CONFIGURATION ====================
+
+    /**
+     * Heading offset calibration value (degrees)
+     */
+    private static final double HEADING_OFFSET = 12.2;
+
+    // ==================== SHOOTING CONFIGURATION ====================
+
+    /**
+     * Delay between shots to allow flywheel recovery (milliseconds)
+     * Adjust between 100-200ms based on testing
+     */
+    private static final double SHOT_DELAY_MS = 8;
+    //10
+
+    // ==================== BATTERY COMPENSATION CONFIGURATION ====================
+
+    /**
+     * Nominal battery voltage (volts)
+     * This is the voltage your shooter was tuned at
+     * Typically 12.5-13.0V for a fresh battery
+     */
+    private static final double NOMINAL_VOLTAGE = 13.4;
+
+    /**
+     * Minimum safe operating voltage (volts)
+     * Below this, scaling becomes less effective
+     */
+    private static final double MIN_VOLTAGE = 11.0;
+
+    /**
+     * Enable/disable battery compensation
+     * Set to false if you experience issues
+     */
+    private static final boolean ENABLE_VOLTAGE_COMPENSATION = true;
+
+    // ==================== HARDWARE OBJECTS ====================
+
+    private DcMotorEx Shooter, Shooter2;
+    private DcMotor Intake, Control;
+    private CRServo LeftServo, RightServo;
+    private ServoImplEx Hood;
+    private VoltageSensor batteryVoltageSensor;
+
+    // ==================== STATE VARIABLES ====================
+
+    /**
+     * PEDRO PIDF HEADING LOCK SYSTEM
+     */
+    private PIDFController headingController;
+    private double headingGoal = 0;
+    private boolean headingLocked = false;
+    private boolean lastY = false;
+
+    /**
+     * AUTOMATED DRIVING SYSTEM
+     */
+    private boolean automatedDrive = false;
+    private Supplier<PathChain> returnPath;
+
+    /**
+     * SHOT DELAY SYSTEM
+     */
+    private final ElapsedTime shootTimer = new ElapsedTime();
+    private boolean lastTriggerPressed = false;
+
+    /**
+     * BATTERY MONITORING
+     */
+    private double currentVoltage = NOMINAL_VOLTAGE;
+    private double voltageCompensationFactor = 0.3;
+
+    // ==================== INITIALIZATION ====================
+
+    @Override
+    public void init() {
+        follower = Constants.createFollower(hardwareMap);
+        initializeHardware();
+        configureMotors();
+        configureServos();
+
+        // Initialize battery voltage sensor
+        batteryVoltageSensor = hardwareMap.voltageSensor.iterator().next();
+
+        // Initialize Pedro PIDF heading lock controller
+        headingController = new PIDFController(follower.constants.coefficientsHeadingPIDF);
+
+        try {
+            follower.setStartingPose(AutoEndPose != null ? AutoEndPose : startPose);
+        } catch (Exception e) {
+            follower.setStartingPose(startPose);
+        }
+
+        follower.update();
+
+        returnPath = () -> follower.pathBuilder()
+                .addPath(new Path(new BezierLine(follower.getPose(), RETURN_POSE)))
+                .setLinearHeadingInterpolation(follower.getPose().getHeading(), RETURN_POSE.getHeading())
+                .build();
+
+        telemetry.addData("Status", "✓ Initialized");
+        telemetry.addLine("Y=Lock | A=Return | B=Cancel");
+        telemetry.addLine("Goal switches at 90+ inches");
+        telemetry.addLine("Shot delay: " + SHOT_DELAY_MS + "ms");
+        telemetry.addLine("Using Pedro PIDF Heading Lock");
+        telemetry.addData("Battery Compensation", ENABLE_VOLTAGE_COMPENSATION ? "ENABLED" : "DISABLED");
+        telemetry.addData("Nominal Voltage", "%.1fV", NOMINAL_VOLTAGE);
+        telemetry.update();
+    }
+
+    private void initializeHardware() {
+        Shooter = hardwareMap.get(DcMotorEx.class, "Shooter");
+        Shooter2 = hardwareMap.get(DcMotorEx.class, "Shooter2");
+        Intake = hardwareMap.get(DcMotor.class, "Intake");
+        Control = hardwareMap.get(DcMotor.class, "Control");
+        LeftServo = hardwareMap.get(CRServo.class, "LeftServo");
+        RightServo = hardwareMap.get(CRServo.class, "RightServo");
+        Hood = hardwareMap.get(ServoImplEx.class, "Hood");
+    }
+
+    private void configureMotors() {
+        Shooter.setDirection(DcMotorSimple.Direction.REVERSE);
+        Shooter2.setDirection(DcMotorSimple.Direction.FORWARD);
+        Control.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        Control.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        Control.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter2.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        PIDFCoefficients shooterPIDF = new PIDFCoefficients(0.015, 0, 0.017, 15.8);
+        //0.015, 0, 0.017, 16.29
+        Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+        Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+    }
+
+    private void configureServos() {
+        Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
+        Hood.setPosition(0);
+        LeftServo.setDirection(CRServo.Direction.FORWARD);
+        RightServo.setDirection(CRServo.Direction.REVERSE);
+    }
+
+    @Override
+    public void start() {
+        follower.startTeleopDrive();
+        shootTimer.reset();
+    }
+
+    // ==================== MAIN LOOP ====================
+
+    @Override
+    public void loop() {
+        follower.update();
+        Pose curPose = follower.getPose();
+
+        // ===== BATTERY VOLTAGE MONITORING AND COMPENSATION =====
+        updateBatteryCompensation();
+
+        // ===== DISTANCE-ADAPTIVE GOAL SELECTION =====
+        double deltaX_initial = GOAL_X_CLOSE - curPose.getX();
+        double deltaY_initial = GOAL_Y_CLOSE - curPose.getY();
+        double initialDistance = Math.sqrt(deltaX_initial * deltaX_initial + deltaY_initial * deltaY_initial);
+
+        double activeGoalX, activeGoalY;
+        boolean usingFarGoal = initialDistance > DISTANCE_THRESHOLD;
+
+        if (usingFarGoal) {
+            activeGoalX = GOAL_X_FAR;
+            activeGoalY = GOAL_Y_FAR;
+        } else {
+            activeGoalX = GOAL_X_CLOSE;
+            activeGoalY = GOAL_Y_CLOSE;
+        }
+
+        double deltaX = activeGoalX - curPose.getX();
+        double deltaY = activeGoalY - curPose.getY();
+        double cachedDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+        // ===== DRIVE CONTROLS =====
+        double drive = -gamepad1.left_stick_y;
+        double strafe = -gamepad1.left_stick_x;
+        double turn = -gamepad1.right_stick_x;
+
+        // ===== PEDRO PIDF HEADING LOCK CONTROL =====
+        if (!automatedDrive) {
+            if (headingLocked) {
+                headingGoal = Math.atan2(deltaY, deltaX) + Math.toRadians(HEADING_OFFSET);
+                headingController.setCoefficients(follower.constants.coefficientsHeadingPIDF);
+                headingController.updateError(getHeadingError());
+                turn = headingController.run();
+            }
+            follower.setTeleOpDrive(drive, strafe, turn, true);
+        }
+
+        // ===== Y BUTTON - TOGGLE HEADING LOCK =====
+        if (gamepad1.y && !lastY) {
+            headingLocked = !headingLocked;
+            if (headingLocked) {
+                headingController.reset();
+            }
+        }
+        lastY = gamepad1.y;
+
+        // ===== A BUTTON - AUTO-DRIVE TO STARTING POSITION =====
+        if (gamepad1.a && !automatedDrive) {
+            follower.followPath(returnPath.get());
+            automatedDrive = true;
+            headingLocked = false;
+        }
+
+        // ===== B BUTTON - CANCEL AUTOMATED DRIVING =====
+        if (automatedDrive && (gamepad1.b || !follower.isBusy())) {
+            follower.startTeleopDrive();
+            automatedDrive = false;
+        }
+
+        // ===== FLYWHEEL CONTROL WITH BATTERY COMPENSATION =====
+        double cachedShooterVelocity = calculateShooterVelocity(cachedDistance);
+        double cachedHoodPosition = calculateHoodPosition(cachedDistance);
+
+        // Apply battery compensation to shooter velocity
+        double compensatedVelocity = cachedShooterVelocity * voltageCompensationFactor;
+
+        Shooter.setVelocity(compensatedVelocity);
+        Shooter2.setVelocity(compensatedVelocity);
+        Hood.setPosition(cachedHoodPosition);
+
+        // ===== MOTOR/SERVO CONTROL WITH SHOT DELAY =====
+        double controlPower = 0.5;
+        double intakePower = 0.7;
+        double servoSpeed = -0.5;
+
+        boolean triggerPressed = gamepad1.right_trigger > 0.2;
+        boolean reverseTrigger = gamepad1.left_trigger > 0.2;
+
+        // Reset timer when trigger is first pressed
+        if (triggerPressed && !lastTriggerPressed) {
+            shootTimer.reset();
+        }
+        lastTriggerPressed = triggerPressed;
+
+        if (reverseTrigger) {
+            // Reverse/unjam mode
+            intakePower = -1.0;
+            controlPower = -0.5;
+            servoSpeed = -0.5;
+        } else if (triggerPressed) {
+            // Shooting mode with delay
+            if (shootTimer.milliseconds() >= SHOT_DELAY_MS) {
+                // Delay elapsed - feed ball
+                intakePower = 1.0;
+                controlPower = 1.0;
+                servoSpeed = 1.0;
+                shootTimer.reset(); // Reset for next shot
+            } else {
+                // Waiting for delay - pause feeding but keep flywheel running
+                intakePower = 0;
+                controlPower = 0;
+                servoSpeed = 0;
+            }
+        } else {
+            // Default idle state
+            intakePower = 0.7;
+            controlPower = 0.5;
+            servoSpeed = -0.5;
+        }
+
+        Intake.setPower(intakePower);
+        Control.setPower(controlPower);
+        LeftServo.setPower(servoSpeed);
+        RightServo.setPower(servoSpeed);
+
+        // ===== TELEMETRY =====
+        telemetry.addData("Mode", automatedDrive ? "🤖 AUTO" :
+                (headingLocked ? "🎯 LOCKED" : "Manual"));
+        telemetry.addData("Pos", "(%.0f, %.0f) %.0f°",
+                curPose.getX(), curPose.getY(), Math.toDegrees(curPose.getHeading()));
+        telemetry.addData("Goal", usingFarGoal ? "FAR (%.0f,%.0f)" : "CLOSE (%.0f,%.0f)",
+                activeGoalX, activeGoalY);
+        telemetry.addData("Dist", "%.0f in | RPM: %.0f (%.0f)",
+                cachedDistance, cachedShooterVelocity, compensatedVelocity);
+
+        // Battery voltage telemetry
+        telemetry.addData("Battery", "%.1fV (×%.2f)", currentVoltage, voltageCompensationFactor);
+
+        // Voltage warning indicator
+        if (currentVoltage < 12.0) {
+            telemetry.addLine("⚠️ LOW BATTERY");
+        }
+
+        if (triggerPressed) {
+            double timeUntilShot = SHOT_DELAY_MS - shootTimer.milliseconds();
+            if (timeUntilShot > 0) {
+                telemetry.addData("🔥 SHOOTING", "Ready in %.0fms", timeUntilShot);
+            } else {
+                telemetry.addLine("🔥 SHOOTING");
+            }
+        }
+
+        telemetry.update();
+    }
+
+    // ==================== BATTERY COMPENSATION ====================
+
+    /**
+     * Update battery voltage and calculate compensation factor
+     *
+     * This method:
+     * 1. Reads current battery voltage
+     * 2. Calculates scaling factor to compensate for voltage drop
+     * 3. Clamps factor to safe operating range
+     *
+     * The compensation is linear: if voltage drops, we increase the target
+     * velocity proportionally to maintain consistent actual velocity.
+     */
+    private void updateBatteryCompensation() {
+        // Read current battery voltage
+        currentVoltage = batteryVoltageSensor.getVoltage();
+
+        if (ENABLE_VOLTAGE_COMPENSATION && currentVoltage >= MIN_VOLTAGE) {
+            // Calculate compensation factor
+            // Formula: targetVelocity * (nominalVoltage / currentVoltage)
+            // Example: 13V nominal, 12V current → multiply velocity by 13/12 = 1.083
+            voltageCompensationFactor = NOMINAL_VOLTAGE / currentVoltage;
+
+            // Clamp to safe range (prevent extreme compensation)
+            // Max 1.25x for safety (up to ~10.4V minimum)
+            if (voltageCompensationFactor > 1.25) {
+                voltageCompensationFactor = 1.25;
+            }
+            // Min 0.9x (in case voltage somehow exceeds nominal)
+            if (voltageCompensationFactor < 0.9) {
+                voltageCompensationFactor = 0.9;
+            }
+        } else {
+            // Compensation disabled or voltage too low
+            voltageCompensationFactor = 1.0;
+        }
+    }
+
+    // ==================== PEDRO PIDF HEADING LOCK HELPER METHOD ====================
+
+    private double getHeadingError() {
+        double currentHeading = follower.getPose().getHeading();
+        double turnDirection = MathFunctions.getTurnDirection(currentHeading, headingGoal);
+        double angleDifference = MathFunctions.getSmallestAngleDifference(currentHeading, headingGoal);
+        return turnDirection * angleDifference;
+    }
+
+    // ==================== REGRESSION METHODS ====================
+
+    private double calculateShooterVelocity(double distance) {
+        if (distance < 1) distance = 1;
+        double velocity = 0.00360311 * Math.pow(distance, 2) + 4.69347 * distance + 723.99696;
+        if (velocity < 850) velocity = 850;
+        if (velocity > 1500) velocity = 1500;
+        return velocity;
+    }
+
+    private double calculateHoodPosition(double distance) {
+        double position = 0.00000214104 * Math.pow(distance, 3)
+                - 0.000576537 * Math.pow(distance, 2)
+                + 0.0518886 * distance
+                - 1.28608;
+        if (position < 0.0) position = 0.0;
+        if (position > 0.350) position = 0.350;
+        return position;
+    }
+}
