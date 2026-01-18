@@ -96,19 +96,19 @@ public class BlueSideMeet3 extends OpMode {
     private final Pose endPose = new Pose(64,105,Math.toRadians(90)); //TESTING POSE
 
     private final Pose pickUpLineUpFirst = new Pose(47.5,83.8, Math.toRadians(180));
-    private final Pose pickUpFirst = new Pose(22,81,Math.toRadians(180));
+    private final Pose pickUpFirst = new Pose(20,81,Math.toRadians(180));
 
     private final Pose pickUpLineUpSecond = new Pose(47,58,Math.toRadians(180));
 
-    private final Pose pickUpSecond = new Pose(14,58,Math.toRadians(180));
+    private final Pose pickUpSecond = new Pose(12,58,Math.toRadians(180));
 
     private final Pose backup = new Pose(30,58, Math.toRadians(180));
 
     private final Pose pickUpLineUpThird = new Pose(45,35,Math.toRadians(180));
 
-    private final Pose pickUpThird = new Pose(12,35,Math.toRadians(180));
+    private final Pose pickUpThird = new Pose(9,35,Math.toRadians(180));
 
-    private final Pose Leave = new Pose(62,104, Math.toRadians(136));
+    private final Pose Leave = new Pose(54,113, Math.toRadians(136));
 
     private PathChain drive_StartPos_ShootPos,drive_ShootPos_EndPos,drive_ShootPos_PickUpLineUpPos,drive_PickUpLineUpPos_PickUP,drive_PickUp_Shoot,drive_ShootPose_PickUpLineUpSecond,drive_PickUpLineUpSecond_PickUpSecond,drive_BackUp_ShootPos,drive_PickUpSecond_BackUp,drive_ShootPos_PickUpLineUpThird,drive_PickUpLineUpThird_PickUpThird,drive_PickUpThird_ShootPos,drive_ShootPos_Leave;
 
@@ -192,7 +192,7 @@ public class BlueSideMeet3 extends OpMode {
             case SHOOT_PRELOAD:
                 AutoEndPose = follower.getPose();
                 //check is follower done it's path and *3 sexconds has elapsed*
-                if (!follower.isBusy() && pathTimer.getElapsedTimeSeconds() > 2){
+                if (!follower.isBusy() && pathTimer.getElapsedTimeSeconds() > 2.5){
                     //TODO: add shooting logic stuff liek rampup things and servo controls
 
                     if (!follower.isBusy()){
