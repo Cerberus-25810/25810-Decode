@@ -58,9 +58,9 @@ public class Meet3Teleop extends OpMode {
 
     // ==================== GOAL POSITION CONSTANTS ====================
 
-    private static final double GOAL_X_CLOSE = 15.0;
+    private static final double GOAL_X_CLOSE = 130.0;
     private static final double GOAL_Y_CLOSE = 135.0;
-    private static final double GOAL_X_FAR = 17.0;
+    private static final double GOAL_X_FAR = 127.0;
     private static final double GOAL_Y_FAR = 140.0;
     private static final double DISTANCE_THRESHOLD = 90.0;
 
