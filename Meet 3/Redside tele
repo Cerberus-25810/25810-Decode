@@ -1,0 +1,382 @@
+package org.firstinspires.ftc.teamcode.Meet3;
+
+import static org.firstinspires.ftc.teamcode.pedroPathing.Tuning.follower;
+
+import com.pedropathing.geometry.BezierLine;
+import com.pedropathing.geometry.Pose;
+import com.pedropathing.paths.Path;
+import com.pedropathing.paths.PathChain;
+import com.pedropathing.control.PIDFController;
+import com.pedropathing.math.MathFunctions;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+import com.qualcomm.robotcore.hardware.DcMotorSimple;
+import com.qualcomm.robotcore.hardware.PIDFCoefficients;
+import com.qualcomm.robotcore.hardware.ServoImplEx;
+import com.qualcomm.robotcore.hardware.PwmControl;
+import com.qualcomm.robotcore.hardware.VoltageSensor;
+
+import org.firstinspires.ftc.teamcode.Meet1.mechanisms.FlywheelLogic;
+import org.firstinspires.ftc.teamcode.Meet1.mechanisms.FlywheelLogicTeleop;
+import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+import static org.firstinspires.ftc.teamcode.Meet3.BlueSideMeet3.AutoEndPose;
+
+import java.util.function.Supplier;
+
+/**
+ * TELEOP WITH FLYWHEELLOGIC STATE MACHINE (SAME AS AUTO)
+ *
+ * This TeleOp implements:
+ * - Pedro Pathing for accurate localization
+ * - Pedro's PIDF heading lock controller for smooth, accurate goal tracking
+ * - FlywheelLogic state machine for consistent shooting (same as autonomous)
+ * - Distance-adaptive goal positioning for better accuracy at different ranges
+ * - Battery voltage compensation for consistent shooting performance
+ *
+ * CONTROLS:
+ * - Left Stick: Drive (robot-centric movement)
+ * - Right Stick: Turn (when heading lock is OFF)
+ * - Y: Toggle heading lock (auto-aim at goal)
+ * - A: Auto-drive to starting position
+ * - B: Cancel auto-drive
+ * - D-Pad Up: Manual position override to (56, 8) @ 90°
+ * - D-Pad Left: Fine turn left (small rotation adjustments)
+ * - D-Pad Right: Fine turn right (small rotation adjustments)
+ * - RT: Fire 3 shots using FlywheelLogic (same as auto)
+ * - LT: Reverse/unjam (reverse all motors)
+ */
+@TeleOp(name="Meet3Teleop", group="TeleOp")
+public class Meet3Teleop extends OpMode {
+
+    // ==================== FLYWHEEL LOGIC (SAME AS AUTO) ====================
+
+    private FlywheelLogicTeleop shooter = new FlywheelLogicTeleop();
+    private final boolean shotsTriggered = false;
+
+    // ==================== GOAL POSITION CONSTANTS ====================
+
+    private static final double GOAL_X_CLOSE = 15.0;
+    private static final double GOAL_Y_CLOSE = 135.0;
+    private static final double GOAL_X_FAR = 17.0;
+    private static final double GOAL_Y_FAR = 140.0;
+    private static final double DISTANCE_THRESHOLD = 90.0;
+
+    private static final Pose RETURN_POSE = new Pose(91, 91, Math.toRadians(38));
+    private final Pose startPose = new Pose(41, 91, Math.toRadians(38));
+    private static final Pose MANUAL_OVERRIDE_POSE = new Pose(129, 142, Math.toRadians(38));
+
+    // ==================== HEADING LOCK CONFIGURATION ====================
+
+    private static final double HEADING_OFFSET = 12.2;
+
+    // ==================== FINE TURN CONTROL CONFIGURATION ====================
+
+    private static final double FINE_TURN_POWER = 0.25; // Adjust this value for finer/coarser control (0.1 - 0.4 recommended)
+
+    // ==================== BATTERY COMPENSATION CONFIGURATION ====================
+
+    private static final double NOMINAL_VOLTAGE = 13.4;
+    private static final double MIN_VOLTAGE = 11.0;
+    private static final boolean ENABLE_VOLTAGE_COMPENSATION = true;
+
+    // ==================== HARDWARE OBJECTS ====================
+
+    private DcMotorEx Shooter, Shooter2;
+    private DcMotor Intake, Control;
+    private CRServo LeftServo, RightServo;
+    private ServoImplEx Hood;
+    private VoltageSensor batteryVoltageSensor;
+
+    // ==================== STATE VARIABLES ====================
+
+    private PIDFController headingController;
+    private double headingGoal = 0;
+    private boolean headingLocked = false;
+    private boolean lastY = false;
+
+    private boolean automatedDrive = false;
+    private Supplier<PathChain> returnPath;
+
+    private boolean lastTriggerPressed = false;
+    private boolean lastReverseTrigger = false;
+    private boolean lastDpadUp = false;
+
+    private double currentVoltage = NOMINAL_VOLTAGE;
+    private double voltageCompensationFactor = 0;
+
+    // ==================== INITIALIZATION ====================
+
+    @Override
+    public void init() {
+        follower = Constants.createFollower(hardwareMap);
+        initializeHardware();
+        configureMotors();
+        configureServos();
+
+        // Initialize FlywheelLogic (same as auto)
+        shooter.init(hardwareMap);
+
+        batteryVoltageSensor = hardwareMap.voltageSensor.iterator().next();
+        headingController = new PIDFController(follower.constants.coefficientsHeadingPIDF);
+
+        try {
+            follower.setStartingPose(AutoEndPose != null ? AutoEndPose : startPose);
+        } catch (Exception e) {
+            follower.setStartingPose(startPose);
+        }
+
+        follower.update();
+
+        returnPath = () -> follower.pathBuilder()
+                .addPath(new Path(new BezierLine(follower.getPose(), RETURN_POSE)))
+                .setLinearHeadingInterpolation(follower.getPose().getHeading(), RETURN_POSE.getHeading())
+                .build();
+
+        telemetry.addData("Status", "✓ Initialized with FlywheelLogic");
+        telemetry.addLine("Y=Lock | A=Return | B=Cancel");
+        telemetry.addLine("RT = Fire 3 shots (same as auto)");
+        telemetry.addLine("D-Pad Up = Manual override");
+        telemetry.addLine("D-Pad L/R = Fine turn control");
+        telemetry.addData("Battery Compensation", ENABLE_VOLTAGE_COMPENSATION ? "ENABLED" : "DISABLED");
+        telemetry.update();
+    }
+
+    private void initializeHardware() {
+        Shooter = hardwareMap.get(DcMotorEx.class, "Shooter");
+        Shooter2 = hardwareMap.get(DcMotorEx.class, "Shooter2");
+        Intake = hardwareMap.get(DcMotor.class, "Intake");
+        Control = hardwareMap.get(DcMotor.class, "Control");
+        LeftServo = hardwareMap.get(CRServo.class, "LeftServo");
+        RightServo = hardwareMap.get(CRServo.class, "RightServo");
+        Hood = hardwareMap.get(ServoImplEx.class, "Hood");
+    }
+
+    private void configureMotors() {
+        Shooter.setDirection(DcMotorSimple.Direction.REVERSE);
+        Shooter2.setDirection(DcMotorSimple.Direction.FORWARD);
+        Control.setDirection(DcMotorSimple.Direction.REVERSE);
+
+        Control.setMode(DcMotor.RunMode.STOP_AND_RESET_ENCODER);
+        Control.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+        Shooter2.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
+
+        PIDFCoefficients shooterPIDF = new PIDFCoefficients(0.002, 0, 0, 15);//0.02, 14.5
+        Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+        Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
+    }
+
+    private void configureServos() {
+        Hood.setPwmRange(new PwmControl.PwmRange(500, 2500));
+        Hood.setPosition(0);
+        LeftServo.setDirection(CRServo.Direction.FORWARD);
+        RightServo.setDirection(CRServo.Direction.REVERSE);
+    }
+
+    @Override
+    public void start() {
+        follower.startTeleopDrive();
+
+        // Start flywheel and intake running (same as auto start())
+        Shooter.setVelocity(1050);
+        Shooter2.setVelocity(1050);
+        Control.setPower(0.3);
+        Intake.setPower(1);
+        LeftServo.setPower(-1);
+        RightServo.setPower(-1);
+    }
+
+    // ==================== MAIN LOOP ====================
+
+    @Override
+    public void loop() {
+        follower.update();
+        Pose curPose = follower.getPose();
+
+        // Update FlywheelLogic state machine (same as auto loop())
+        shooter.update();
+
+        updateBatteryCompensation();
+
+        // ===== DISTANCE-ADAPTIVE GOAL SELECTION =====
+        double deltaX_initial = GOAL_X_CLOSE - curPose.getX();
+        double deltaY_initial = GOAL_Y_CLOSE - curPose.getY();
+        double initialDistance = Math.sqrt(deltaX_initial * deltaX_initial + deltaY_initial * deltaY_initial);
+
+        double activeGoalX, activeGoalY;
+        boolean usingFarGoal = initialDistance > DISTANCE_THRESHOLD;
+
+        if (usingFarGoal) {
+            activeGoalX = GOAL_X_FAR;
+            activeGoalY = GOAL_Y_FAR;
+        } else {
+            activeGoalX = GOAL_X_CLOSE;
+            activeGoalY = GOAL_Y_CLOSE;
+        }
+
+        double deltaX = activeGoalX - curPose.getX();
+        double deltaY = activeGoalY - curPose.getY();
+        double cachedDistance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+
+        // ===== DRIVE CONTROLS (LIMITED TO 0.8 POWER) =====
+        double drive = -gamepad1.left_stick_y * 0.8;
+        double strafe = -gamepad1.left_stick_x * 0.8;
+        double turn = -gamepad1.right_stick_x * 0.8;
+
+        // ===== FINE TURN CONTROL WITH D-PAD LEFT/RIGHT =====
+        if (gamepad1.dpad_left) {
+            turn = FINE_TURN_POWER; // Turn left with fine control
+            headingLocked = false; // Disable heading lock when using fine turn
+        } else if (gamepad1.dpad_right) {
+            turn = -FINE_TURN_POWER; // Turn right with fine control
+            headingLocked = false; // Disable heading lock when using fine turn
+        }
+
+        // ===== PEDRO PIDF HEADING LOCK CONTROL =====
+        if (!automatedDrive) {
+            if (headingLocked) {
+                headingGoal = Math.atan2(deltaY, deltaX) + Math.toRadians(HEADING_OFFSET);
+                headingController.setCoefficients(follower.constants.coefficientsHeadingPIDF);
+                headingController.updateError(getHeadingError());
+                turn = headingController.run();
+            }
+            follower.setTeleOpDrive(drive, strafe, turn, true);
+        }
+
+        // ===== Y BUTTON - TOGGLE HEADING LOCK =====
+        if (gamepad1.y && !lastY) {
+            headingLocked = !headingLocked;
+            if (headingLocked) {
+                headingController.reset();
+            }
+        }
+        lastY = gamepad1.y;
+
+        // ===== A BUTTON - AUTO-DRIVE TO STARTING POSITION =====
+        if (gamepad1.a && !automatedDrive) {
+            follower.followPath(returnPath.get());
+            automatedDrive = true;
+            headingLocked = false;
+        }
+
+        // ===== B BUTTON - CANCEL AUTOMATED DRIVING =====
+        if (automatedDrive && (gamepad1.b || !follower.isBusy())) {
+            follower.startTeleopDrive();
+            automatedDrive = false;
+        }
+
+        // ===== D-PAD UP - MANUAL POSITION OVERRIDE =====
+        if (gamepad1.dpad_up && !lastDpadUp) {
+            follower.setPose(MANUAL_OVERRIDE_POSE);
+            headingLocked = false;
+            automatedDrive = false;
+            telemetry.addLine("✓ Position override: (56, 8) @ 90°");
+            telemetry.update();
+        }
+        lastDpadUp = gamepad1.dpad_up;
+
+        // ===== FLYWHEEL CONTROL WITH BATTERY COMPENSATION =====
+        double cachedShooterVelocity = calculateShooterVelocity(cachedDistance);
+        double cachedHoodPosition = calculateHoodPosition(cachedDistance);
+        double compensatedVelocity = cachedShooterVelocity * voltageCompensationFactor;
+
+        // Keep flywheel spinning at distance-based velocity
+        Shooter.setVelocity(compensatedVelocity);
+        Shooter2.setVelocity(compensatedVelocity);
+        Hood.setPosition(cachedHoodPosition);
+
+        // ===== SHOOTING CONTROL (USING FLYWHEELLOGIC - SAME AS AUTO) =====
+        boolean triggerPressed = gamepad1.right_trigger > 0.01;
+        boolean reverseTrigger = gamepad1.left_trigger > 0.2;
+
+        if (reverseTrigger) {
+            // Reverse/unjam mode
+            Intake.setPower(-1.0);
+            Control.setPower(-0.7);
+            LeftServo.setPower(-0.5);
+            RightServo.setPower(-0.5);
+        } else if (triggerPressed && !lastTriggerPressed && !shooter.isBusy()) {
+            // Trigger just pressed and shooter is idle - fire 3 shots!
+            shooter.fireShots(3);
+        } else if (!shooter.isBusy() && !triggerPressed) {
+            // Idle state - keep intake running to stage balls
+            Intake.setPower(0.7);//1
+            Control.setPower(0.5);
+            LeftServo.setPower(-0.7);//-1
+            RightServo.setPower(-0.7);
+        }
+        // Note: When shooter.isBusy(), FlywheelLogic controls the servos/control motor
+
+        lastTriggerPressed = triggerPressed;
+
+        // ===== TELEMETRY =====
+        telemetry.addData("Mode", automatedDrive ? "🤖 AUTO" :
+                (headingLocked ? "🎯 LOCKED" : "Manual"));
+        telemetry.addData("Pos", "(%.0f, %.0f) %.0f°",
+                curPose.getX(), curPose.getY(), Math.toDegrees(curPose.getHeading()));
+        telemetry.addData("Goal", usingFarGoal ? "FAR (%.0f,%.0f)" : "CLOSE (%.0f,%.0f)",
+                activeGoalX, activeGoalY);
+        telemetry.addData("Dist", "%.0f in | RPM: %.0f (%.0f)",
+                cachedDistance, cachedShooterVelocity, compensatedVelocity);
+        telemetry.addData("Battery", "%.1fV (×%.2f)", currentVoltage, voltageCompensationFactor);
+
+        // Shooter state telemetry
+        if (shooter.isBusy()) {
+            telemetry.addLine("🔥 SHOOTING (FlywheelLogic)");
+        } else if (triggerPressed) {
+            telemetry.addLine("Ready to fire!");
+        }
+
+        if (currentVoltage < 11.0) {//12
+            telemetry.addLine("⚠️ LOW BATTERY");
+        }
+
+        telemetry.update();
+    }
+
+    // ==================== BATTERY COMPENSATION ====================
+
+    private void updateBatteryCompensation() {
+        currentVoltage = batteryVoltageSensor.getVoltage();
+
+        if (ENABLE_VOLTAGE_COMPENSATION && currentVoltage >= MIN_VOLTAGE) {
+            voltageCompensationFactor = NOMINAL_VOLTAGE / currentVoltage;
+            if (voltageCompensationFactor > 1.25) voltageCompensationFactor = 1.25;
+            if (voltageCompensationFactor < 0.9) voltageCompensationFactor = 0.9;
+        } else {
+            voltageCompensationFactor = 1.0;
+        }
+    }
+
+    // ==================== PEDRO PIDF HEADING LOCK HELPER METHOD ====================
+
+    private double getHeadingError() {
+        double currentHeading = follower.getPose().getHeading();
+        double turnDirection = MathFunctions.getTurnDirection(currentHeading, headingGoal);
+        double angleDifference = MathFunctions.getSmallestAngleDifference(currentHeading, headingGoal);
+        return turnDirection * angleDifference;
+    }
+
+    // ==================== REGRESSION METHODS ====================
+
+    private double calculateShooterVelocity(double distance) {
+        if (distance < 1) distance = 1;
+        double velocity = 0.00360311 * Math.pow(distance, 2) + 4.69347 * distance + 723.99696;
+        if (velocity < 850) velocity = 850;
+        if (velocity > 1500) velocity = 1500;
+        return velocity;
+    }
+
+    private double calculateHoodPosition(double distance) {
+        double position = 0.00000214104 * Math.pow(distance, 3)
+                - 0.000576537 * Math.pow(distance, 2)
+                + 0.0518886 * distance
+                - 1.28608;
+        if (position < 0.0) position = 0.0;
+        if (position > 0.350) position = 0.350;
+        return position + 0.03;
+    }
+}
