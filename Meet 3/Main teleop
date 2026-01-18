@@ -1,4 +1,4 @@
-package org.firstinspires.ftc.teamcode.expirement;
+package org.firstinspires.ftc.teamcode.Meet3;
 
 import static org.firstinspires.ftc.teamcode.pedroPathing.Tuning.follower;
 
@@ -19,7 +19,8 @@ import com.qualcomm.robotcore.hardware.ServoImplEx;
 import com.qualcomm.robotcore.hardware.PwmControl;
 import com.qualcomm.robotcore.hardware.VoltageSensor;
 
-import org.firstinspires.ftc.teamcode.EmbeddedMechanisms.FlywheelLogic;
+import org.firstinspires.ftc.teamcode.Meet1.mechanisms.FlywheelLogic;
+import org.firstinspires.ftc.teamcode.Meet1.mechanisms.FlywheelLogicTeleop;
 import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
 import static org.firstinspires.ftc.teamcode.Meet3.BlueSideMeet3.AutoEndPose;
 
@@ -41,20 +42,23 @@ import java.util.function.Supplier;
  * - Y: Toggle heading lock (auto-aim at goal)
  * - A: Auto-drive to starting position
  * - B: Cancel auto-drive
+ * - D-Pad Up: Manual position override to (56, 8) @ 90°
+ * - D-Pad Left: Fine turn left (small rotation adjustments)
+ * - D-Pad Right: Fine turn right (small rotation adjustments)
  * - RT: Fire 3 shots using FlywheelLogic (same as auto)
  * - LT: Reverse/unjam (reverse all motors)
  */
-@TeleOp(name="backup", group="TeleOp")
-public class backup extends OpMode {
+@TeleOp(name="Meet3Teleop", group="TeleOp")
+public class Meet3Teleop extends OpMode {
 
     // ==================== FLYWHEEL LOGIC (SAME AS AUTO) ====================
 
-    private FlywheelLogic shooter = new FlywheelLogic();
-    private boolean shotsTriggered = false;
+    private FlywheelLogicTeleop shooter = new FlywheelLogicTeleop();
+    private final boolean shotsTriggered = false;
 
     // ==================== GOAL POSITION CONSTANTS ====================
 
-    private static final double GOAL_X_CLOSE = 13.0;
+    private static final double GOAL_X_CLOSE = 15.0;
     private static final double GOAL_Y_CLOSE = 135.0;
     private static final double GOAL_X_FAR = 17.0;
     private static final double GOAL_Y_FAR = 140.0;
@@ -62,10 +66,15 @@ public class backup extends OpMode {
 
     private static final Pose RETURN_POSE = new Pose(51, 91, Math.toRadians(143));
     private final Pose startPose = new Pose(51, 91, Math.toRadians(143));
+    private static final Pose MANUAL_OVERRIDE_POSE = new Pose(15, 122, Math.toRadians(144));
 
     // ==================== HEADING LOCK CONFIGURATION ====================
 
     private static final double HEADING_OFFSET = 12.2;
+
+    // ==================== FINE TURN CONTROL CONFIGURATION ====================
+
+    private static final double FINE_TURN_POWER = 0.25; // Adjust this value for finer/coarser control (0.1 - 0.4 recommended)
 
     // ==================== BATTERY COMPENSATION CONFIGURATION ====================
 
@@ -93,6 +102,7 @@ public class backup extends OpMode {
 
     private boolean lastTriggerPressed = false;
     private boolean lastReverseTrigger = false;
+    private boolean lastDpadUp = false;
 
     private double currentVoltage = NOMINAL_VOLTAGE;
     private double voltageCompensationFactor = 0;
@@ -128,6 +138,8 @@ public class backup extends OpMode {
         telemetry.addData("Status", "✓ Initialized with FlywheelLogic");
         telemetry.addLine("Y=Lock | A=Return | B=Cancel");
         telemetry.addLine("RT = Fire 3 shots (same as auto)");
+        telemetry.addLine("D-Pad Up = Manual override");
+        telemetry.addLine("D-Pad L/R = Fine turn control");
         telemetry.addData("Battery Compensation", ENABLE_VOLTAGE_COMPENSATION ? "ENABLED" : "DISABLED");
         telemetry.update();
     }
@@ -152,7 +164,7 @@ public class backup extends OpMode {
         Shooter.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
         Shooter2.setMode(DcMotor.RunMode.RUN_USING_ENCODER);
 
-        PIDFCoefficients shooterPIDF = new PIDFCoefficients(0.002, 0, 0, 15.0);//0.02, 14.5
+        PIDFCoefficients shooterPIDF = new PIDFCoefficients(0.002, 0, 0, 15);//0.02, 14.5
         Shooter.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
         Shooter2.setPIDFCoefficients(DcMotor.RunMode.RUN_USING_ENCODER, shooterPIDF);
     }
@@ -214,6 +226,15 @@ public class backup extends OpMode {
         double strafe = -gamepad1.left_stick_x * 0.8;
         double turn = -gamepad1.right_stick_x * 0.8;
 
+        // ===== FINE TURN CONTROL WITH D-PAD LEFT/RIGHT =====
+        if (gamepad1.dpad_left) {
+            turn = FINE_TURN_POWER; // Turn left with fine control
+            headingLocked = false; // Disable heading lock when using fine turn
+        } else if (gamepad1.dpad_right) {
+            turn = -FINE_TURN_POWER; // Turn right with fine control
+            headingLocked = false; // Disable heading lock when using fine turn
+        }
+
         // ===== PEDRO PIDF HEADING LOCK CONTROL =====
         if (!automatedDrive) {
             if (headingLocked) {
@@ -246,6 +267,16 @@ public class backup extends OpMode {
             follower.startTeleopDrive();
             automatedDrive = false;
         }
+
+        // ===== D-PAD UP - MANUAL POSITION OVERRIDE =====
+        if (gamepad1.dpad_up && !lastDpadUp) {
+            follower.setPose(MANUAL_OVERRIDE_POSE);
+            headingLocked = false;
+            automatedDrive = false;
+            telemetry.addLine("✓ Position override: (56, 8) @ 90°");
+            telemetry.update();
+        }
+        lastDpadUp = gamepad1.dpad_up;
 
         // ===== FLYWHEEL CONTROL WITH BATTERY COMPENSATION =====
         double cachedShooterVelocity = calculateShooterVelocity(cachedDistance);
@@ -346,6 +377,6 @@ public class backup extends OpMode {
                 - 1.28608;
         if (position < 0.0) position = 0.0;
         if (position > 0.350) position = 0.350;
-        return position;
+        return position + 0.03;
     }
 }
