@@ -1,0 +1,36 @@
+package org.firstinspires.ftc.teamcode;
+
+import com.bylazar.configurables.annotations.Configurable;
+import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.CRServo;
+import com.qualcomm.robotcore.hardware.DcMotor;
+import com.qualcomm.robotcore.hardware.DcMotorEx;
+
+@Configurable
+@TeleOp(name = "Run only 1 motor")
+public class onemotore extends LinearOpMode {
+
+    private DcMotorEx Shooter, Shooter2;
+    private DcMotor Intake;
+    private CRServo LeftServo, RightServo;
+
+    @Override
+    public void runOpMode() {
+        // Initialize hardware FIRST
+        Shooter = hardwareMap.get(DcMotorEx.class, "Shooter");
+        Shooter2 = hardwareMap.get(DcMotorEx.class, "Shooter2");
+        Intake = hardwareMap.get(DcMotor.class, "Intake");
+        LeftServo = hardwareMap.get(CRServo.class, "LeftServo");
+        RightServo = hardwareMap.get(CRServo.class, "RightServo");
+
+        waitForStart();
+
+        while (opModeIsActive()) {
+            // Now this will work - runs BOTH shooter motors at full power
+            Shooter.setPower(1);
+            Shooter2.setPower(1);  // You probably want this too
+        }
+    }
+}
+`
