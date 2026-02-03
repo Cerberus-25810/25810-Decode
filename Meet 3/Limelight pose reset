@@ -1,0 +1,397 @@
+package org.firstinspires.ftc.teamcode;
+
+import static org.firstinspires.ftc.teamcode.pedroPathing.Tuning.follower;
+
+import com.pedropathing.ftc.FTCCoordinates;
+import com.pedropathing.geometry.Pose;
+import com.pedropathing.geometry.PedroCoordinates;
+import com.pedropathing.math.MathFunctions;
+import com.qualcomm.hardware.limelightvision.LLResult;
+import com.qualcomm.hardware.limelightvision.LLResultTypes;
+import com.qualcomm.hardware.limelightvision.Limelight3A;
+import com.qualcomm.robotcore.eventloop.opmode.OpMode;
+import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
+import com.qualcomm.robotcore.hardware.Gamepad;
+
+import org.firstinspires.ftc.robotcore.external.navigation.Pose3D;
+import org.firstinspires.ftc.teamcode.pedroPathing.Constants;
+
+import java.util.ArrayList;
+import java.util.List;
+
+@TeleOp(name = "Limelight Pose Correction", group = "Testing")
+public class quand extends OpMode {
+
+    // ===== CONFIGURATION =====
+    private final Pose startPose = new Pose(21.792, 124.3442, Math.toRadians(143));
+
+    private static final double GOAL_X = 10;
+    private static final double GOAL_Y = 137;
+
+    private static final int TARGET_APRIL_TAG_ID = 20;
+    private static final int SAMPLE_COUNT = 15;
+    private static final double SAMPLE_DELAY_MS = 20;
+
+    // Limelight physical offset from robot center (inches, in ROBOT frame)
+    private static final double LIMELIGHT_OFFSET_X = 11.81; // Lateral offset (+ = right)
+    private static final double LIMELIGHT_OFFSET_Y = 7.54; // Forward offset (+ = forward)
+
+    // Small residual heading calibration offset (degrees). Tune if auto-aim
+    // is consistently off by a fixed amount after using the FTC->Pedro conversion.
+    private static final double HEADING_OFFSET_DEG = -0.8343;
+
+    // Auto-aim PID tuning
+    private static final double AIM_KP = 0.9;
+    private static final double AIM_KD = 0.1;
+
+    // Limelight drift correction weight (0 = trust only Pinpoint, 1 = trust only LL)
+    private static final double LIMELIGHT_CORRECTION_WEIGHT = 0.5;
+
+    // ===== HARDWARE =====
+    private Limelight3A limelight;
+
+    // ===== STATE =====
+    private boolean lastX = false;
+    private boolean lastY = false;
+    private boolean isCorrectingPose = false;
+    private boolean autoAimEnabled  = false;
+    private double  lastHeadingError = 0;
+
+    // Correction result state (written by correction thread, read by main loop telemetry)
+    private volatile boolean   correctionSucceeded  = false;
+    private volatile int       correctionSamples    = 0;
+    private volatile double    correctedX           = 0;
+    private volatile double    correctedY           = 0;
+    private volatile double    correctedHeading     = 0;
+    private volatile boolean   showCorrectionResult = false; // flag: show result for a few cycles
+
+    @Override
+    public void init() {
+        follower = Constants.createFollower(hardwareMap);
+        follower.setPose(startPose);
+
+        limelight = hardwareMap.get(Limelight3A.class, "limelight");
+        limelight.pipelineSwitch(8);
+        limelight.setPollRateHz(20);
+        limelight.start();
+
+        telemetry.addData("Status", "Initialized");
+        telemetry.addData("Controls", "");
+        telemetry.addData("X Button", "Correct pose using April tag");
+        telemetry.addData("Y Button", "Toggle auto-aim to goal");
+        telemetry.update();
+    }
+
+    @Override
+    public void start() {
+        follower.startTeleopDrive();
+    }
+
+    @Override
+    public void loop() {
+        follower.update();
+        Pose pose = follower.getPose();
+
+        // ===== POSE CORRECTION (X button) =====
+        boolean currentX = gamepad1.x;
+        if (currentX && !lastX && !isCorrectingPose) {
+            showCorrectionResult = false;
+            new Thread(this::performPoseCorrection).start();
+        }
+        lastX = currentX;
+
+        // ===== AUTO-AIM TOGGLE (Y button) =====
+        boolean currentY = gamepad1.y;
+        if (currentY && !lastY) {
+            autoAimEnabled = !autoAimEnabled;
+            if (autoAimEnabled) {
+                lastHeadingError = 0;
+            }
+        }
+        lastY = currentY;
+
+        // ===== LIMELIGHT DRIFT CORRECTION =====
+        if (autoAimEnabled) {
+            applyLimelightDriftCorrection();
+            // Re-read pose after potential correction
+            pose = follower.getPose();
+        }
+
+        // ===== DRIVETRAIN =====
+        double drive  = -gamepad1.left_stick_y  * 0.8;
+        double strafe = -gamepad1.left_stick_x  * 0.8;
+        double turn;
+
+        if (autoAimEnabled) {
+            double targetHeading  = computeTargetHeading();
+            double currentHeading = pose.getHeading();
+
+            // Signed heading error (positive = need to turn CCW toward target)
+            double headingError = MathFunctions.getTurnDirection(currentHeading, targetHeading)
+                    * MathFunctions.getSmallestAngleDifference(currentHeading, targetHeading);
+
+            // PD controller
+            double derivative = headingError - lastHeadingError;
+            turn = AIM_KP * headingError + AIM_KD * derivative;
+            lastHeadingError = headingError;
+
+            turn = Math.max(-1.0, Math.min(1.0, turn));
+        } else {
+            turn = -gamepad1.right_stick_x * 0.8;
+        }
+
+        follower.setTeleOpDrive(drive, strafe, turn, true);
+
+        // ===== TELEMETRY =====
+        telemetry.addData("Auto-Aim", autoAimEnabled ? "ENABLED (Y to disable)" : "DISABLED (Y to enable)");
+        telemetry.addData("Pose Correction", isCorrectingPose ? "CORRECTING..." : "Ready (Press X)");
+        telemetry.addData("", "");
+        telemetry.addData("Robot X",       "%.2f",     pose.getX());
+        telemetry.addData("Robot Y",       "%.2f",     pose.getY());
+        telemetry.addData("Robot Heading", "%.1f deg", Math.toDegrees(pose.getHeading()));
+
+        // Show correction result for a few cycles after it completes
+        if (showCorrectionResult) {
+            telemetry.addData("", "");
+            if (correctionSucceeded) {
+                telemetry.addData("✓ Pose Corrected!",  "Samples: %d", correctionSamples);
+                telemetry.addData("New X",       "%.2f",     correctedX);
+                telemetry.addData("New Y",       "%.2f",     correctedY);
+                telemetry.addData("New Heading", "%.1f deg", Math.toDegrees(correctedHeading));
+            } else {
+                telemetry.addData("✗ Correction Failed", "No April Tag ID %d detected", TARGET_APRIL_TAG_ID);
+            }
+        }
+
+        if (autoAimEnabled) {
+            double targetHeading    = computeTargetHeading();
+            double distanceToGoal   = Math.hypot(GOAL_X - pose.getX(), GOAL_Y - pose.getY());
+            double errorDeg         = Math.toDegrees(
+                    MathFunctions.getTurnDirection(pose.getHeading(), targetHeading)
+                            * MathFunctions.getSmallestAngleDifference(pose.getHeading(), targetHeading)
+            );
+            telemetry.addData("", "");
+            telemetry.addData("Target Heading",  "%.1f deg",    Math.toDegrees(targetHeading));
+            telemetry.addData("Heading Error",   "%.1f deg",    errorDeg);
+            telemetry.addData("Distance to Goal","%.2f inches", distanceToGoal);
+        }
+
+        // Debug: raw LL pose so you can figure out the frame transform
+        telemetry.addData("", "");
+        telemetry.addData("--- RAW LL DEBUG ---", "");
+        debugLimelightRaw();
+
+        telemetry.update();
+    }
+
+    // =========================================================================
+    // POSE CORRECTION  (runs on a background thread)
+    // =========================================================================
+    private void performPoseCorrection() {
+        isCorrectingPose = true;
+
+        ArrayList<Double> xSamples       = new ArrayList<>();
+        ArrayList<Double> ySamples       = new ArrayList<>();
+        ArrayList<Double> headingSamples = new ArrayList<>();
+
+        for (int i = 0; i < SAMPLE_COUNT; i++) {
+            Pose currentPose = follower.getPose();
+            limelight.updateRobotOrientation(Math.toDegrees(currentPose.getHeading()));
+
+            LLResult result = limelight.getLatestResult();
+
+            if (result != null && result.isValid()) {
+                LLResultTypes.FiducialResult targetTag = getAprilTag(result, TARGET_APRIL_TAG_ID);
+                if (targetTag != null) {
+                    Pose3D botpose = result.getBotpose_MT2();
+                    if (botpose != null) {
+                        Pose fieldPose = convertLimelightToFieldPose(botpose);
+                        xSamples.add(fieldPose.getX());
+                        ySamples.add(fieldPose.getY());
+                        headingSamples.add(fieldPose.getHeading());
+                    }
+                }
+            }
+
+            try {
+                Thread.sleep((long) SAMPLE_DELAY_MS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+
+        if (!xSamples.isEmpty()) {
+            double avgX       = average(xSamples);
+            double avgY       = average(ySamples);
+            double avgHeading = averageAngles(headingSamples);
+
+            follower.setPose(new Pose(avgX, avgY, avgHeading));
+
+            // Store results for main-loop telemetry
+            correctedX       = avgX;
+            correctedY       = avgY;
+            correctedHeading = avgHeading;
+            correctionSamples = xSamples.size();
+            correctionSucceeded = true;
+
+            rumbleGamepad(gamepad1, 500);
+        } else {
+            correctionSucceeded = false;
+            rumbleGamepad(gamepad1, 200, 3);
+        }
+
+        showCorrectionResult = true;   // tell main loop to display the result
+        isCorrectingPose     = false;
+    }
+
+    // =========================================================================
+    // COORDINATE TRANSFORM: Limelight MegaTag2  →  Pedro field coords
+    // =========================================================================
+    /**
+     * Converts a Limelight MegaTag2 botpose into Pedro field coordinates.
+     *
+     * MegaTag2 botpose is in standard FTC field coordinates (meters, yaw in degrees).
+     * Pedro's Pose class can accept a coordinate system and convert automatically:
+     *   new Pose(x, y, heading, FTCCoordinates.INSTANCE).getAsCoordinateSystem(PedroCoordinates.INSTANCE)
+     *
+     * Steps:
+     *   1. Extract position (meters) and yaw (degrees) from botpose.
+     *   2. Convert meters → inches (FTC field coords are in inches).
+     *   3. Convert yaw from degrees → radians.
+     *   4. Subtract the camera-to-robot-center offset (rotated into field frame).
+     *   5. Hand off to Pedro's built-in FTC→Pedro converter.
+     *   6. Add small residual heading offset for calibration.
+     */
+    private Pose convertLimelightToFieldPose(Pose3D botpose) {
+        // 1 & 2: position in inches (FTC field frame)
+        double ftcX = botpose.getPosition().x * 39.3701;
+        double ftcY = botpose.getPosition().y * 39.3701;
+
+        // 3: yaw in radians
+        double ftcYaw = Math.toRadians(botpose.getOrientation().getYaw());
+
+        // 4: subtract camera offset (defined in robot frame, rotate into field frame)
+        double offX = LIMELIGHT_OFFSET_X * Math.cos(ftcYaw) - LIMELIGHT_OFFSET_Y * Math.sin(ftcYaw);
+        double offY = LIMELIGHT_OFFSET_X * Math.sin(ftcYaw) + LIMELIGHT_OFFSET_Y * Math.cos(ftcYaw);
+        ftcX -= offX;
+        ftcY -= offY;
+
+        // 5: let Pedro convert from FTC coords to Pedro coords
+        Pose pedroFieldPose = new Pose(ftcX, ftcY, ftcYaw, FTCCoordinates.INSTANCE)
+                .getAsCoordinateSystem(PedroCoordinates.INSTANCE);
+
+        // 6: add small residual heading calibration
+        return new Pose(
+                pedroFieldPose.getX(),
+                pedroFieldPose.getY(),
+                pedroFieldPose.getHeading() + Math.toRadians(HEADING_OFFSET_DEG)
+        );
+    }
+
+    // =========================================================================
+    // AUTO-AIM  →  target heading
+    // =========================================================================
+    /**
+     * Heading the robot needs in order to face (GOAL_X, GOAL_Y).
+     * Pedro heading 0 = +Y, increases CCW  →  atan2(-dx, -dy) is the right form.
+     */
+    private double computeTargetHeading() {
+        Pose p  = follower.getPose();
+        double dx = GOAL_X - p.getX();
+        double dy = GOAL_Y - p.getY();
+        return Math.atan2(-dx, -dy) + Math.toRadians(HEADING_OFFSET_DEG);
+    }
+
+    // =========================================================================
+    // CONTINUOUS DRIFT CORRECTION (while auto-aim is active)
+    // =========================================================================
+    private void applyLimelightDriftCorrection() {
+        Pose currentPose = follower.getPose();
+        limelight.updateRobotOrientation(Math.toDegrees(currentPose.getHeading()));
+
+        LLResult result = limelight.getLatestResult();
+        if (result == null || !result.isValid()) return;
+
+        LLResultTypes.FiducialResult targetTag = getAprilTag(result, TARGET_APRIL_TAG_ID);
+        if (targetTag == null) return;
+
+        Pose3D botpose = result.getBotpose_MT2();
+        if (botpose == null) return;
+
+        Pose limelightPose = convertLimelightToFieldPose(botpose);
+
+        double w = LIMELIGHT_CORRECTION_WEIGHT;
+        double corrX = currentPose.getX() * (1 - w) + limelightPose.getX() * w;
+        double corrY = currentPose.getY() * (1 - w) + limelightPose.getY() * w;
+        double corrH = blendAngles(currentPose.getHeading(), limelightPose.getHeading(), w);
+
+        follower.setPose(new Pose(corrX, corrY, corrH));
+    }
+
+    // =========================================================================
+    // DEBUG: print raw LL botpose for sanity-checking the conversion
+    // =========================================================================
+    private void debugLimelightRaw() {
+        limelight.updateRobotOrientation(Math.toDegrees(follower.getPose().getHeading()));
+        LLResult result = limelight.getLatestResult();
+        if (result != null && result.isValid()) {
+            Pose3D botpose = result.getBotpose_MT2();
+            if (botpose != null) {
+                telemetry.addData("LL raw X (m)",   "%.4f", botpose.getPosition().x);
+                telemetry.addData("LL raw Y (m)",   "%.4f", botpose.getPosition().y);
+                telemetry.addData("LL raw Yaw (°)", "%.2f", botpose.getOrientation().getYaw());
+            } else {
+                telemetry.addData("LL botpose", "null (no MT2)");
+            }
+        } else {
+            telemetry.addData("LL result", "invalid / null");
+        }
+    }
+
+    // =========================================================================
+    // UTILITIES
+    // =========================================================================
+    private LLResultTypes.FiducialResult getAprilTag(LLResult result, int targetId) {
+        List<LLResultTypes.FiducialResult> fiducials = result.getFiducialResults();
+        if (fiducials == null) return null;
+        for (LLResultTypes.FiducialResult f : fiducials) {
+            if (f != null && f.getFiducialId() == targetId) return f;
+        }
+        return null;
+    }
+
+    private double average(ArrayList<Double> values) {
+        if (values.isEmpty()) return 0;
+        double sum = 0;
+        for (double v : values) sum += v;
+        return sum / values.size();
+    }
+
+    /** Circular mean of a list of angles (radians). */
+    private double averageAngles(ArrayList<Double> angles) {
+        if (angles.isEmpty()) return 0;
+        double sinSum = 0, cosSum = 0;
+        for (double a : angles) { sinSum += Math.sin(a); cosSum += Math.cos(a); }
+        return Math.atan2(sinSum, cosSum);
+    }
+
+    /** Circular lerp between two angles. */
+    private double blendAngles(double a1, double a2, double w) {
+        double blendedSin = Math.sin(a1) * (1 - w) + Math.sin(a2) * w;
+        double blendedCos = Math.cos(a1) * (1 - w) + Math.cos(a2) * w;
+        return Math.atan2(blendedSin, blendedCos);
+    }
+
+    private void rumbleGamepad(Gamepad gp, int durationMs) { rumbleGamepad(gp, durationMs, 1); }
+
+    private void rumbleGamepad(Gamepad gp, int durationMs, int pulses) {
+        new Thread(() -> {
+            for (int i = 0; i < pulses; i++) {
+                gp.rumble(1.0, 1.0, durationMs);
+                try { Thread.sleep(durationMs + 100); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+        }).start();
+    }
+}
